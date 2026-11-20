@@ -1,11 +1,19 @@
+pub mod codegen;
 pub mod directives;
+pub mod registry;
 
-pub use directives::{
-    compile_directive, compile_else, compile_elseif, compile_endfor, compile_endif, compile_for,
-    compile_if, is_builtin_directive, DirectiveEntry, DirectiveKind, DirectiveStack,
+pub use codegen::{
+    CodeGenerator, CodegenOptions, CompilerOptions, OutputFormat,
 };
+pub use directives::{
+    compile_directive, compile_directive_with_registry, compile_else, compile_elseif,
+    compile_endfor, compile_endif, compile_for, compile_if, is_builtin_directive,
+    DirectiveEntry, DirectiveKind, DirectiveStack,
+};
+pub use registry::{register_directive, DirectiveHandler, DirectiveRegistry};
 
 use std::fmt;
+
 use crate::lexer::{LexerError, Scanner, SpannedToken, Token};
 
 /// Errors that can occur during template compilation.
@@ -57,6 +65,13 @@ pub enum CompileError {
         line: usize,
         column: usize,
     },
+
+    /// A directive is not recognized as a built-in or registered custom directive
+    UnknownDirective {
+        directive: String,
+        line: usize,
+        column: usize,
+    },
 }
 
 impl CompileError {
@@ -75,7 +90,8 @@ impl CompileError {
             | CompileError::UnclosedDirective { line, .. }
             | CompileError::UnexpectedDirective { line, .. }
             | CompileError::MissingDirectiveArgs { line, .. }
-            | CompileError::UnexpectedDirectiveArgs { line, .. } => *line,
+            | CompileError::UnexpectedDirectiveArgs { line, .. }
+            | CompileError::UnknownDirective { line, .. } => *line,
         }
     }
 
@@ -94,7 +110,8 @@ impl CompileError {
             | CompileError::UnclosedDirective { column, .. }
             | CompileError::UnexpectedDirective { column, .. }
             | CompileError::MissingDirectiveArgs { column, .. }
-            | CompileError::UnexpectedDirectiveArgs { column, .. } => *column,
+            | CompileError::UnexpectedDirectiveArgs { column, .. }
+            | CompileError::UnknownDirective { column, .. } => *column,
         }
     }
 }
@@ -165,6 +182,16 @@ impl fmt::Display for CompileError {
                     "Directive '@{directive}' does not accept arguments at line {line}, column {column}"
                 )
             }
+            CompileError::UnknownDirective {
+                directive,
+                line,
+                column,
+            } => {
+                write!(
+                    f,
+                    "Unknown directive '@{directive}' at line {line}, column {column}"
+                )
+            }
         }
     }
 }
@@ -178,73 +205,190 @@ impl From<LexerError> for CompileError {
 }
 
 /// Compiler for Rade templates that compiles built-in directives, raw RHP blocks,
-/// and template tokens into target code.
-#[derive(Debug, Clone, Default)]
+/// custom registered directives, and template tokens into target code.
+#[derive(Debug, Clone)]
 pub struct Compiler {
     stack: DirectiveStack,
+    registry: DirectiveRegistry,
+    options: CompilerOptions,
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Compiler {
-    /// Creates a new `Compiler` instance with an empty directive stack.
+    /// Creates a new `Compiler` instance with an empty directive stack, a local directive registry,
+    /// and default configuration (directives-only expansion for backwards compatibility).
     pub fn new() -> Self {
         Self {
             stack: DirectiveStack::new(),
+            registry: DirectiveRegistry::new(),
+            options: CompilerOptions::directives_only(),
         }
     }
 
-    /// Compiles a template string into target RHP/template code.
+    /// Creates a new `Compiler` instance configured for standalone script RHP codegen.
+    pub fn standalone() -> Self {
+        Self {
+            stack: DirectiveStack::new(),
+            registry: DirectiveRegistry::new(),
+            options: CompilerOptions::standalone(),
+        }
+    }
+
+    /// Creates a new `Compiler` instance configured for callable closure RHP codegen.
+    pub fn closure() -> Self {
+        Self {
+            stack: DirectiveStack::new(),
+            registry: DirectiveRegistry::new(),
+            options: CompilerOptions::closure(),
+        }
+    }
+
+    /// Creates a new `Compiler` instance with specific compiler options.
+    pub fn with_options(options: CompilerOptions) -> Self {
+        Self {
+            stack: DirectiveStack::new(),
+            registry: DirectiveRegistry::new(),
+            options,
+        }
+    }
+
+    /// Creates a new `Compiler` instance with a specific directive registry.
+    pub fn with_registry(registry: DirectiveRegistry) -> Self {
+        Self {
+            stack: DirectiveStack::new(),
+            registry,
+            options: CompilerOptions::directives_only(),
+        }
+    }
+
+    /// Fluent builder method to set the target output format.
+    pub fn with_format(mut self, format: OutputFormat) -> Self {
+        self.options.format = format;
+        self
+    }
+
+    /// Returns a reference to the compiler options.
+    pub fn options(&self) -> &CompilerOptions {
+        &self.options
+    }
+
+    /// Returns a mutable reference to the compiler options.
+    pub fn options_mut(&mut self) -> &mut CompilerOptions {
+        &mut self.options
+    }
+
+    /// Sets the compiler options.
+    pub fn set_options(&mut self, options: CompilerOptions) {
+        self.options = options;
+    }
+
+    /// Sets the target output format.
+    pub fn set_format(&mut self, format: OutputFormat) {
+        self.options.format = format;
+    }
+
+    /// Registers a custom directive on this compiler instance.
+    pub fn register_directive<F>(&mut self, name: impl Into<String>, handler: F) -> &mut Self
+    where
+        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
+    {
+        self.registry.register(name, handler);
+        self
+    }
+
+    /// Returns a reference to the compiler's directive registry.
+    pub fn registry(&self) -> &DirectiveRegistry {
+        &self.registry
+    }
+
+    /// Returns a mutable reference to the compiler's directive registry.
+    pub fn registry_mut(&mut self) -> &mut DirectiveRegistry {
+        &mut self.registry
+    }
+
+    /// Replaces the compiler's directive registry.
+    pub fn set_registry(&mut self, registry: DirectiveRegistry) {
+        self.registry = registry;
+    }
+
+    /// Compiles a template string into target RHP/template code according to the configured options.
     pub fn compile(&mut self, input: &str) -> Result<String, CompileError> {
         let spanned_tokens = Scanner::scan_spanned(input)?;
         self.compile_spanned_tokens(&spanned_tokens)
     }
 
-    /// Compiles a slice of `SpannedToken`s.
+    /// Compiles a template string into standalone RHP code using pure string accumulation.
+    pub fn compile_to_rhp(&mut self, input: &str) -> Result<String, CompileError> {
+        let spanned_tokens = Scanner::scan_spanned(input)?;
+        CodeGenerator::new(CompilerOptions::standalone()).generate(&spanned_tokens, &self.registry)
+    }
+
+    /// Compiles a template string into callable closure RHP code using pure string accumulation.
+    pub fn compile_to_closure(&mut self, input: &str) -> Result<String, CompileError> {
+        let spanned_tokens = Scanner::scan_spanned(input)?;
+        CodeGenerator::new(CompilerOptions::closure()).generate(&spanned_tokens, &self.registry)
+    }
+
+    /// Compiles a slice of `SpannedToken`s according to the configured options.
     pub fn compile_spanned_tokens(
         &mut self,
         tokens: &[SpannedToken],
     ) -> Result<String, CompileError> {
-        let mut output = String::new();
+        match self.options.format {
+            OutputFormat::DirectivesOnly => {
+                let mut output = String::new();
 
-        for spanned in tokens {
-            match &spanned.token {
-                Token::Text(text) => {
-                    output.push_str(text);
+                for spanned in tokens {
+                    match &spanned.token {
+                        Token::Text(text) => {
+                            output.push_str(text);
+                        }
+                        Token::Comment(_) => {
+                            // Blade comments are stripped during compilation
+                        }
+                        Token::RawRhp(code) => {
+                            // Directly emits the inner RHP code as-is without any wrapping or alteration
+                            output.push_str(code);
+                        }
+                        Token::Directive { name, args } => {
+                            let compiled = compile_directive_with_registry(
+                                name,
+                                args.as_deref(),
+                                spanned.line,
+                                spanned.column,
+                                &mut self.stack,
+                                &self.registry,
+                            )?;
+                            output.push_str(&compiled);
+                        }
+                        Token::EchoEscaped(expr) => {
+                            output.push_str("{{ ");
+                            output.push_str(expr);
+                            output.push_str(" }}");
+                        }
+                        Token::EchoRaw(expr) => {
+                            output.push_str("{!! ");
+                            output.push_str(expr);
+                            output.push_str(" !!}");
+                        }
+                        Token::EscapedVerbatim(verbatim) => {
+                            output.push_str(verbatim);
+                        }
+                    }
                 }
-                Token::Comment(_) => {
-                    // Blade comments are stripped during compilation
-                }
-                Token::RawRhp(code) => {
-                    // Directly emits the inner RHP code as-is without any wrapping or alteration
-                    output.push_str(code);
-                }
-                Token::Directive { name, args } => {
-                    let compiled = compile_directive(
-                        name,
-                        args.as_deref(),
-                        spanned.line,
-                        spanned.column,
-                        &mut self.stack,
-                    )?;
-                    output.push_str(&compiled);
-                }
-                Token::EchoEscaped(expr) => {
-                    output.push_str("{{ ");
-                    output.push_str(expr);
-                    output.push_str(" }}");
-                }
-                Token::EchoRaw(expr) => {
-                    output.push_str("{!! ");
-                    output.push_str(expr);
-                    output.push_str(" !!}");
-                }
-                Token::EscapedVerbatim(verbatim) => {
-                    output.push_str(verbatim);
-                }
+
+                self.stack.finish()?;
+                Ok(output)
+            }
+            OutputFormat::Standalone | OutputFormat::Closure => {
+                CodeGenerator::new(self.options).generate(tokens, &self.registry)
             }
         }
-
-        self.stack.finish()?;
-        Ok(output)
     }
 
     /// Compiles a slice of `Token`s, using line 1, column 1 as fallback positions.
@@ -257,7 +401,25 @@ impl Compiler {
     }
 }
 
-/// Convenience helper function to compile a template string in one call.
+/// Convenience helper function to compile a template string in one call (legacy directive-expansion pass).
 pub fn compile(input: &str) -> Result<String, CompileError> {
     Compiler::new().compile(input)
+}
+
+/// Convenience helper function to compile a template string into standalone RHP code.
+pub fn compile_to_rhp(input: &str) -> Result<String, CompileError> {
+    CodeGenerator::new(CompilerOptions::standalone()).compile(input, DirectiveRegistry::global())
+}
+
+/// Convenience helper function to compile a template string into callable closure format.
+pub fn compile_to_closure(input: &str) -> Result<String, CompileError> {
+    CodeGenerator::new(CompilerOptions::closure()).compile(input, DirectiveRegistry::global())
+}
+
+/// Convenience helper function to compile a template string with specific options.
+pub fn compile_with_options(
+    input: &str,
+    options: CompilerOptions,
+) -> Result<String, CompileError> {
+    CodeGenerator::new(options).compile(input, DirectiveRegistry::global())
 }
