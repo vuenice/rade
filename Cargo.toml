@@ -1,0 +1,16 @@
+[package]
+name = "rade"
+version = "0.1.0"
+edition = "2021"
+description = "RHP templating engine inspired by blade"
+license = "MIT"
+
+[lib]
+name = "rade"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rade"
+path = "src/main.rs"
+
+[dependencies]
