@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::process;
-use rade::tokenize;
+use rade::{compile, tokenize};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -26,6 +26,16 @@ fn main() {
         }
         Err(err) => {
             eprintln!("Lexer error: {err}");
+            process::exit(1);
+        }
+    }
+
+    match compile(&input) {
+        Ok(compiled) => {
+            println!("\nCompiled output:\n{compiled}");
+        }
+        Err(err) => {
+            eprintln!("Compiler error: {err}");
             process::exit(1);
         }
     }

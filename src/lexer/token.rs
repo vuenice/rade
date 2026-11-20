@@ -85,4 +85,32 @@ impl Token {
             Token::Directive { args, .. } => args.as_deref(),
         }
     }
+
+    /// Wraps this token with 1-indexed line and column positions.
+    pub fn spanned(self, line: usize, column: usize) -> SpannedToken {
+        SpannedToken::new(self, line, column)
+    }
+}
+
+/// A token with its starting 1-indexed line and column positions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl SpannedToken {
+    /// Creates a new `SpannedToken`.
+    pub fn new(token: Token, line: usize, column: usize) -> Self {
+        Self { token, line, column }
+    }
+}
+
+impl std::ops::Deref for SpannedToken {
+    type Target = Token;
+
+    fn deref(&self) -> &Self::Target {
+        &self.token
+    }
 }

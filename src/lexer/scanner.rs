@@ -1,5 +1,5 @@
 use std::fmt;
-use crate::lexer::token::Token;
+use crate::lexer::token::{SpannedToken, Token};
 
 /// Errors that can occur during template lexical analysis.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,17 +98,35 @@ impl<'a> Scanner<'a> {
         Scanner::new(input).tokenize()
     }
 
+    /// Convenience helper to tokenize the given input string into spanned tokens.
+    pub fn scan_spanned(input: &'a str) -> Result<Vec<SpannedToken>, LexerError> {
+        Scanner::new(input).tokenize_spanned()
+    }
+
     /// Scans the entire template input and returns a vector of `Token`s.
     pub fn tokenize(&mut self) -> Result<Vec<Token>, LexerError> {
+        let spanned = self.tokenize_spanned()?;
+        Ok(spanned.into_iter().map(|s| s.token).collect())
+    }
+
+    /// Scans the entire template input and returns a vector of `SpannedToken`s with line and column.
+    pub fn tokenize_spanned(&mut self) -> Result<Vec<SpannedToken>, LexerError> {
         let mut tokens = Vec::new();
         let mut current_text = String::new();
+        let mut text_start_line = self.line;
+        let mut text_start_col = self.column;
 
         while !self.is_eof() {
             let rem = self.remaining();
 
             // 1. Blade comment: {{-- ... --}}
             if rem.starts_with("{{--") {
-                self.flush_text(&mut tokens, &mut current_text);
+                Self::flush_spanned_text(
+                    &mut tokens,
+                    &mut current_text,
+                    text_start_line,
+                    text_start_col,
+                );
                 let start_line = self.line;
                 let start_col = self.column;
                 self.advance_str("{{--");
@@ -121,7 +139,11 @@ impl<'a> Scanner<'a> {
                         let content_end = self.cursor;
                         let raw_content = &self.input[content_start..content_end];
                         self.advance_str("--}}");
-                        tokens.push(Token::Comment(raw_content.trim().to_string()));
+                        tokens.push(SpannedToken::new(
+                            Token::Comment(raw_content.trim().to_string()),
+                            start_line,
+                            start_col,
+                        ));
                         found = true;
                         break;
                     }
@@ -139,7 +161,12 @@ impl<'a> Scanner<'a> {
 
             // 2. Raw echo: {!! ... !!}
             if rem.starts_with("{!!") {
-                self.flush_text(&mut tokens, &mut current_text);
+                Self::flush_spanned_text(
+                    &mut tokens,
+                    &mut current_text,
+                    text_start_line,
+                    text_start_col,
+                );
                 let start_line = self.line;
                 let start_col = self.column;
                 self.advance_str("{!!");
@@ -158,7 +185,11 @@ impl<'a> Scanner<'a> {
                         let content_end = self.cursor;
                         let raw_content = &self.input[content_start..content_end];
                         self.advance_str("!!}");
-                        tokens.push(Token::EchoRaw(raw_content.trim().to_string()));
+                        tokens.push(SpannedToken::new(
+                            Token::EchoRaw(raw_content.trim().to_string()),
+                            start_line,
+                            start_col,
+                        ));
                         found = true;
                         break;
                     }
@@ -176,7 +207,12 @@ impl<'a> Scanner<'a> {
 
             // 3. Escaped verbatim echo: @{{ ... }}
             if rem.starts_with("@{{") {
-                self.flush_text(&mut tokens, &mut current_text);
+                Self::flush_spanned_text(
+                    &mut tokens,
+                    &mut current_text,
+                    text_start_line,
+                    text_start_col,
+                );
                 let start_line = self.line;
                 let start_col = self.column;
 
@@ -197,7 +233,11 @@ impl<'a> Scanner<'a> {
                         self.advance_str("}}");
                         let content_end = self.cursor; // points after "}}"
                         let verbatim = &self.input[content_start..content_end];
-                        tokens.push(Token::EscapedVerbatim(verbatim.to_string()));
+                        tokens.push(SpannedToken::new(
+                            Token::EscapedVerbatim(verbatim.to_string()),
+                            start_line,
+                            start_col,
+                        ));
                         found = true;
                         break;
                     }
@@ -215,7 +255,12 @@ impl<'a> Scanner<'a> {
 
             // 4. Escaped echo: {{ ... }}
             if rem.starts_with("{{") {
-                self.flush_text(&mut tokens, &mut current_text);
+                Self::flush_spanned_text(
+                    &mut tokens,
+                    &mut current_text,
+                    text_start_line,
+                    text_start_col,
+                );
                 let start_line = self.line;
                 let start_col = self.column;
                 self.advance_str("{{");
@@ -234,7 +279,11 @@ impl<'a> Scanner<'a> {
                         let content_end = self.cursor;
                         let raw_content = &self.input[content_start..content_end];
                         self.advance_str("}}");
-                        tokens.push(Token::EchoEscaped(raw_content.trim().to_string()));
+                        tokens.push(SpannedToken::new(
+                            Token::EchoEscaped(raw_content.trim().to_string()),
+                            start_line,
+                            start_col,
+                        ));
                         found = true;
                         break;
                     }
@@ -252,6 +301,10 @@ impl<'a> Scanner<'a> {
 
             // 5. Escaped @ (e.g. @@directive or @@click): emits '@' as plain text
             if rem.starts_with("@@") {
+                if current_text.is_empty() {
+                    text_start_line = self.line;
+                    text_start_col = self.column;
+                }
                 current_text.push('@');
                 self.advance(); // first '@'
                 self.advance(); // second '@'
@@ -266,6 +319,10 @@ impl<'a> Scanner<'a> {
                     .map_or(false, |c| c.is_ascii_alphanumeric() || c == '_');
 
                 if preceded_by_word_char {
+                    if current_text.is_empty() {
+                        text_start_line = self.line;
+                        text_start_col = self.column;
+                    }
                     current_text.push('@');
                     self.advance();
                     continue;
@@ -279,6 +336,10 @@ impl<'a> Scanner<'a> {
 
                 if !is_ident_start {
                     // E.g. "@ 123" or "@" at EOF or "@123"
+                    if current_text.is_empty() {
+                        text_start_line = self.line;
+                        text_start_col = self.column;
+                    }
                     current_text.push('@');
                     self.advance();
                     continue;
@@ -291,7 +352,12 @@ impl<'a> Scanner<'a> {
                         char_after_rhp.map_or(false, |c| c.is_ascii_alphanumeric() || c == '_');
 
                     if !is_ident_continue {
-                        self.flush_text(&mut tokens, &mut current_text);
+                        Self::flush_spanned_text(
+                            &mut tokens,
+                            &mut current_text,
+                            text_start_line,
+                            text_start_col,
+                        );
                         let start_line = self.line;
                         let start_col = self.column;
                         self.advance_str("@rhp");
@@ -304,7 +370,11 @@ impl<'a> Scanner<'a> {
                                 let content_end = self.cursor;
                                 let raw_content = &self.input[content_start..content_end];
                                 self.advance_str("@endrhp");
-                                tokens.push(Token::RawRhp(raw_content.trim().to_string()));
+                                tokens.push(SpannedToken::new(
+                                    Token::RawRhp(raw_content.trim().to_string()),
+                                    start_line,
+                                    start_col,
+                                ));
                                 found = true;
                                 break;
                             }
@@ -322,7 +392,12 @@ impl<'a> Scanner<'a> {
                 }
 
                 // Regular directive: @name or @name(...)
-                self.flush_text(&mut tokens, &mut current_text);
+                Self::flush_spanned_text(
+                    &mut tokens,
+                    &mut current_text,
+                    text_start_line,
+                    text_start_col,
+                );
                 let start_line = self.line;
                 let start_col = self.column;
 
@@ -406,23 +481,45 @@ impl<'a> Scanner<'a> {
                     None
                 };
 
-                tokens.push(Token::Directive { name, args });
+                tokens.push(SpannedToken::new(
+                    Token::Directive { name, args },
+                    start_line,
+                    start_col,
+                ));
                 continue;
             }
 
             // 7. Regular character: accumulate into current_text
+            if current_text.is_empty() {
+                text_start_line = self.line;
+                text_start_col = self.column;
+            }
             let ch = self.advance().unwrap();
             current_text.push(ch);
         }
 
-        self.flush_text(&mut tokens, &mut current_text);
+        Self::flush_spanned_text(
+            &mut tokens,
+            &mut current_text,
+            text_start_line,
+            text_start_col,
+        );
         Ok(tokens)
     }
 
-    /// Flushes accumulated text into a `Token::Text` if non-empty.
-    fn flush_text(&self, tokens: &mut Vec<Token>, current_text: &mut String) {
+    /// Flushes accumulated text into a `SpannedToken` with `Token::Text` if non-empty.
+    fn flush_spanned_text(
+        tokens: &mut Vec<SpannedToken>,
+        current_text: &mut String,
+        line: usize,
+        column: usize,
+    ) {
         if !current_text.is_empty() {
-            tokens.push(Token::Text(std::mem::take(current_text)));
+            tokens.push(SpannedToken::new(
+                Token::Text(std::mem::take(current_text)),
+                line,
+                column,
+            ));
         }
     }
 

@@ -1,8 +1,5 @@
+pub mod compiler;
 pub mod lexer;
 
-pub use lexer::{LexerError, Scanner, Token};
-
-/// Tokenizes a template string into a vector of tokens.
-pub fn tokenize(input: &str) -> Result<Vec<Token>, LexerError> {
-    Scanner::scan(input)
-}
+pub use compiler::{compile, CompileError, Compiler};
+pub use lexer::{tokenize, tokenize_spanned, LexerError, Scanner, SpannedToken, Token};
