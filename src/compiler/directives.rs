@@ -1,4 +1,5 @@
 use std::fmt;
+use crate::compiler::registry::DirectiveRegistry;
 use crate::compiler::CompileError;
 
 /// The kind of block-level directive.
@@ -226,13 +227,15 @@ pub fn compile_endfor() -> &'static str {
     "}"
 }
 
-/// Processes and compiles a directive token, updating and validating against the directive stack.
-pub fn compile_directive(
+/// Processes and compiles a directive token using the provided registry (and falling back to the global registry),
+/// updating and validating against the directive stack.
+pub fn compile_directive_with_registry(
     name: &str,
     args: Option<&str>,
     line: usize,
     column: usize,
     stack: &mut DirectiveStack,
+    registry: &DirectiveRegistry,
 ) -> Result<String, CompileError> {
     match name {
         "if" => {
@@ -311,12 +314,33 @@ pub fn compile_directive(
             Ok(compile_endfor().to_string())
         }
         _ => {
-            // For custom / unknown directives, keep verbatim
-            if let Some(a) = args {
-                Ok(format!("@{name}({a})"))
+            // Check custom registry (local first, then global)
+            let handler = registry.get(name).or_else(|| DirectiveRegistry::global().get(name));
+            if let Some(handler) = handler {
+                Ok(handler(args))
+            } else if args.is_some() {
+                Err(CompileError::UnknownDirective {
+                    directive: name.to_string(),
+                    line,
+                    column,
+                })
             } else {
+                // If unregistered and lacks parenthesis, treat as plain text
                 Ok(format!("@{name}"))
             }
         }
     }
 }
+
+/// Processes and compiles a directive token using the global directive registry,
+/// updating and validating against the directive stack.
+pub fn compile_directive(
+    name: &str,
+    args: Option<&str>,
+    line: usize,
+    column: usize,
+    stack: &mut DirectiveStack,
+) -> Result<String, CompileError> {
+    compile_directive_with_registry(name, args, line, column, stack, DirectiveRegistry::global())
+}
+

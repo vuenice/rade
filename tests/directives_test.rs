@@ -526,10 +526,15 @@ fn test_directive_stack_unit() {
 
 #[test]
 fn test_compiler_with_custom_directives() {
+    let mut compiler = Compiler::new();
+    compiler.register_directive("custom_directive", |args| {
+        format!("@custom_directive({})", args.unwrap_or(""))
+    });
     let input = "@if($cond)\n  @custom_directive('param')\n@endif";
-    let output = compile(input).unwrap();
+    let output = compiler.compile(input).unwrap();
     assert_eq!(output, "if ($cond) {\n  @custom_directive('param')\n}");
 }
+
 
 #[test]
 fn test_comprehensive_template() {
